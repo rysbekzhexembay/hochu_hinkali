@@ -468,6 +468,22 @@
       </div>
     </div>
 
+    <!-- Статус облачной базы данных и вход администратора -->
+    <div id="cloud-bar" class="bg-brand-creamDark/60 border-b border-brand-creamDark px-4 py-2 shrink-0 no-print">
+      <div class="max-w-6xl mx-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+        <span id="cloud-dot" class="w-2 h-2 rounded-full bg-gray-400 shrink-0"></span>
+        <span id="cloud-status" class="font-semibold text-brand-graphite">Облако: подключение…</span>
+        <form id="cloud-login-form" onsubmit="cloudLogin(event)" class="hidden items-center gap-2 flex-wrap">
+          <input type="email" id="cloud-email" required autocomplete="username" placeholder="Email администратора"
+            class="bg-white px-3 py-1.5 rounded-lg border border-brand-creamDark text-xs focus:outline-none focus:border-brand-orange w-44">
+          <input type="password" id="cloud-pass" required autocomplete="current-password" placeholder="Пароль"
+            class="bg-white px-3 py-1.5 rounded-lg border border-brand-creamDark text-xs focus:outline-none focus:border-brand-orange w-32">
+          <button type="submit" class="px-3 py-1.5 rounded-lg bg-brand-burgundy hover:bg-brand-burgundyDark text-white font-semibold cursor-pointer">Войти</button>
+        </form>
+        <button id="cloud-logout-btn" onclick="cloudLogout()" class="hidden px-3 py-1.5 rounded-lg bg-white border border-brand-creamDark hover:bg-brand-cream font-semibold text-brand-graphite cursor-pointer">Выйти</button>
+      </div>
+    </div>
+
     <!-- Вкладки админки -->
     <div class="bg-white border-b border-brand-creamDark px-4 shrink-0 no-print overflow-x-auto no-scrollbar">
       <div class="max-w-6xl mx-auto flex gap-5">
@@ -967,6 +983,7 @@
       } catch (e) {
         console.error('Ошибка сохранения списка столиков:', e);
       }
+      pushToCloud({ tables: list });
     }
 
     function isValidTableNumber(num) {
@@ -1128,6 +1145,9 @@
       renderMenu();
       updateCartUI();
       lucide.createIcons();
+
+      // Подключаем общую базу: меню обновится у всех в реальном времени
+      initCloud();
     }
 
     function saveMenuToStorage() {
@@ -1136,6 +1156,174 @@
       } catch (e) {
         console.error('Ошибка записи в localStorage:', e);
       }
+      pushToCloud({ menu: menuItems });
+    }
+
+    // ==================== ОБЩАЯ БАЗА ДАННЫХ (Firebase Firestore) ====================
+    // Данные меню и столиков лежат в одном документе: коллекция "cafe" → документ "data".
+    // Все устройства подписаны на него в реальном времени (onSnapshot).
+    const FIREBASE_CONFIG = {
+      apiKey: '',            // ← вставьте значения из Firebase Console
+      authDomain: '',        //   (Project settings → Your apps → Web app → SDK config)
+      projectId: '',
+      appId: ''
+    };
+    const CLOUD_ENABLED = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId);
+    const FIREBASE_VERSION = '10.12.2';
+
+    const cloud = { ready: false, error: false, isAdmin: false, email: '', docMissing: false, ref: null, fs: null, auth: null, authMod: null };
+
+    function cleanForCloud(data) {
+      return JSON.parse(JSON.stringify(data)); // убирает undefined, т.к. Firestore их не принимает
+    }
+
+    async function initCloud() {
+      updateCloudBar();
+      if (!CLOUD_ENABLED) return;
+      try {
+        const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
+        const [appMod, fsMod, authMod] = await Promise.all([
+          import(`${base}/firebase-app.js`),
+          import(`${base}/firebase-firestore.js`),
+          import(`${base}/firebase-auth.js`)
+        ]);
+        const app = appMod.initializeApp(FIREBASE_CONFIG);
+        cloud.fs = fsMod;
+        cloud.authMod = authMod;
+        cloud.auth = authMod.getAuth(app);
+        cloud.ref = fsMod.doc(fsMod.getFirestore(app), 'cafe', 'data');
+        cloud.ready = true;
+
+        authMod.onAuthStateChanged(cloud.auth, user => {
+          cloud.isAdmin = !!user;
+          cloud.email = user ? (user.email || '') : '';
+          // Первый вход администратора в пустую базу: загружаем туда текущее меню и столики
+          if (user && cloud.docMissing) {
+            pushToCloud({ menu: menuItems, tables: tableList });
+            cloud.docMissing = false;
+          }
+          updateCloudBar();
+        });
+
+        fsMod.onSnapshot(cloud.ref, onCloudSnapshot, err => {
+          console.error('Ошибка Firestore:', err);
+          cloud.error = true;
+          updateCloudBar();
+        });
+      } catch (e) {
+        console.error('Не удалось подключить Firebase:', e);
+        cloud.error = true;
+        updateCloudBar();
+      }
+    }
+
+    function onCloudSnapshot(snap) {
+      cloud.error = false;
+      cloud.docMissing = !snap.exists();
+      updateCloudBar();
+
+      // Это эхо нашей же записи — интерфейс уже обновлён
+      if (snap.metadata.hasPendingWrites) return;
+
+      if (cloud.docMissing) {
+        if (cloud.isAdmin) {
+          pushToCloud({ menu: menuItems, tables: tableList });
+          cloud.docMissing = false;
+        }
+        return;
+      }
+
+      const data = snap.data() || {};
+
+      if (Array.isArray(data.menu) && data.menu.length > 0) {
+        menuItems = data.menu;
+        try { localStorage.setItem(STORAGE_KEY_MENU, JSON.stringify(menuItems)); } catch (e) {}
+        menuItems.forEach(item => {
+          if (item.variants && item.variants.length > 0 && selectedVariants[item.id] === undefined) {
+            selectedVariants[item.id] = 0;
+          }
+        });
+        renderMenu();
+        updateCartUI();
+
+        // Если админ-панель открыта и он не печатает цену — обновим список
+        const panel = document.getElementById('admin-panel-modal');
+        const active = document.activeElement;
+        const typing = active && panel.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName);
+        if (!panel.classList.contains('hidden') && !typing) renderAdminItems();
+      }
+
+      if (Array.isArray(data.tables) && data.tables.length > 0) {
+        const newTables = data.tables.map(Number).filter(n => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
+        if (JSON.stringify(newTables) !== JSON.stringify(tableList)) {
+          tableList = newTables;
+          try { localStorage.setItem(STORAGE_KEY_TABLES, JSON.stringify(tableList)); } catch (e) {}
+          syncTablesEverywhere();
+        }
+      }
+    }
+
+    function pushToCloud(fields) {
+      if (!CLOUD_ENABLED || !cloud.ready) return;
+      if (!cloud.isAdmin) {
+        showToast('Сохранено только на этом устройстве. Войдите как администратор (полоса вверху админ-панели), чтобы изменения увидели все.', 'error');
+        return;
+      }
+      cloud.fs.setDoc(cloud.ref, { ...cleanForCloud(fields), updatedAt: Date.now() }, { merge: true })
+        .catch(err => {
+          console.error('Ошибка записи в облако:', err);
+          showToast('Не удалось сохранить в облако: ' + (err.code || err.message), 'error');
+        });
+    }
+
+    async function cloudLogin(e) {
+      e.preventDefault();
+      const email = document.getElementById('cloud-email').value.trim();
+      const pass = document.getElementById('cloud-pass').value;
+      try {
+        await cloud.authMod.signInWithEmailAndPassword(cloud.auth, email, pass);
+        document.getElementById('cloud-pass').value = '';
+        showToast('Вход выполнен. Теперь изменения видны всем гостям', 'success');
+      } catch (err) {
+        showToast('Не удалось войти: неверный email или пароль', 'error');
+      }
+    }
+
+    function cloudLogout() {
+      if (cloud.auth) cloud.authMod.signOut(cloud.auth);
+    }
+
+    function updateCloudBar() {
+      const dot = document.getElementById('cloud-dot');
+      const status = document.getElementById('cloud-status');
+      const form = document.getElementById('cloud-login-form');
+      const logout = document.getElementById('cloud-logout-btn');
+      if (!dot || !status) return;
+
+      const show = (el, on) => { el.classList.toggle('hidden', !on); if (el === form) el.classList.toggle('flex', on); };
+      let color = 'bg-gray-400', text = '', showForm = false, showLogout = false;
+
+      if (!CLOUD_ENABLED) {
+        text = 'Облако не настроено: меню хранится только на этом устройстве';
+      } else if (cloud.error) {
+        color = 'bg-red-500';
+        text = 'Нет связи с облаком (проверьте интернет и настройки Firebase)';
+      } else if (!cloud.ready) {
+        text = 'Облако: подключение…';
+      } else if (cloud.isAdmin) {
+        color = 'bg-emerald-500';
+        text = `Синхронизация включена • вы вошли как ${cloud.email} • изменения видны всем сразу`;
+        showLogout = true;
+      } else {
+        color = 'bg-amber-500';
+        text = 'Облако подключено, но вы не вошли — изменения НЕ попадут к другим гостям';
+        showForm = true;
+      }
+
+      dot.className = `w-2 h-2 rounded-full shrink-0 ${color}`;
+      status.textContent = text;
+      show(form, showForm);
+      show(logout, showLogout);
     }
 
     function renderTableBadge() {
@@ -1759,6 +1947,7 @@
     }
 
     function openAdminPanel() {
+      updateCloudBar();
       switchAdminTab('items');
       renderAdminItems();
       openModal('admin-panel-modal');
