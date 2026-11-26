@@ -472,21 +472,18 @@
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
-      <p class="text-xs text-brand-muted mb-4">Введите PIN-код администратора для управления стоп-листом и ценами (код по умолчанию: <strong class="text-brand-graphite">1234</strong>).</p>
-      
-      <input type="password" id="admin-pin-input" maxlength="4" placeholder="••••"
-        onkeydown="if(event.key==='Enter') verifyAdminPin()"
-        class="w-full text-center tracking-[0.5em] font-bold text-xl py-3 rounded-2xl border border-brand-creamDark bg-brand-cream focus:bg-white focus:border-brand-orange focus:outline-none mb-2">
-      <p id="admin-pin-error" class="hidden text-xs text-red-600 font-medium text-center mb-3">Неверный PIN-код. Попробуйте 1234</p>
-      
-      <div class="flex gap-2 mt-3">
-        <button onclick="verifyAdminPin()" class="flex-1 bg-brand-orange hover:bg-brand-orangeDark text-white font-bold py-3 rounded-xl transition cursor-pointer">
+      <p class="text-xs text-brand-muted mb-4">Войдите с email и паролем администратора, чтобы управлять стоп-листом, ценами и столиками.</p>
+
+      <form onsubmit="adminLogin(event)" class="space-y-2">
+        <input type="email" id="admin-login-email" required autocomplete="username" placeholder="Email"
+          class="w-full text-sm py-3 px-4 rounded-2xl border border-brand-creamDark bg-brand-cream focus:bg-white focus:border-brand-orange focus:outline-none">
+        <input type="password" id="admin-login-pass" required autocomplete="current-password" placeholder="Пароль"
+          class="w-full text-sm py-3 px-4 rounded-2xl border border-brand-creamDark bg-brand-cream focus:bg-white focus:border-brand-orange focus:outline-none">
+        <p id="admin-login-error" class="hidden text-xs text-red-600 font-medium text-center"></p>
+        <button id="admin-login-btn" type="submit" class="w-full mt-1 bg-brand-orange hover:bg-brand-orangeDark text-white font-bold py-3 rounded-xl transition cursor-pointer">
           Войти
         </button>
-        <button onclick="document.getElementById('admin-pin-input').value='1234'; verifyAdminPin();" class="px-4 py-3 rounded-xl bg-brand-cream hover:bg-brand-creamDark text-brand-burgundy text-xs font-bold transition cursor-pointer">
-          Быстрый вход
-        </button>
-      </div>
+      </form>
     </div>
   </div>
 
@@ -2196,19 +2193,48 @@
 
     // 9. АДМИН-ПАНЕЛЬ (СТОП-ЛИСТ, ЦЕНЫ, TELEGRAM И ГЕНЕРАТОР QR-КОДОВ)
     function openAdminAuth() {
-      document.getElementById('admin-pin-input').value = '';
-      document.getElementById('admin-pin-error').classList.add('hidden');
+      if (!CLOUD_ENABLED) {
+        showToast('Вход недоступен: не настроена общая база (FIREBASE_CONFIG).', 'error');
+        return;
+      }
+      if (!cloud.ready) {
+        showToast('Подключение к базе ещё идёт, попробуйте через пару секунд.', 'info');
+        return;
+      }
+      // Уже вошли на этом устройстве — сразу открываем админку
+      if (cloud.isAdmin) {
+        openAdminPanel();
+        return;
+      }
+      document.getElementById('admin-login-pass').value = '';
+      document.getElementById('admin-login-error').classList.add('hidden');
       openModal('admin-auth-modal');
-      setTimeout(() => document.getElementById('admin-pin-input').focus(), 100);
+      setTimeout(() => document.getElementById('admin-login-email').focus(), 100);
     }
 
-    function verifyAdminPin() {
-      const pin = document.getElementById('admin-pin-input').value.trim();
-      if (pin === '1234') {
+    async function adminLogin(e) {
+      e.preventDefault();
+      const email = document.getElementById('admin-login-email').value.trim();
+      const pass = document.getElementById('admin-login-pass').value;
+      const errEl = document.getElementById('admin-login-error');
+      const btn = document.getElementById('admin-login-btn');
+
+      btn.disabled = true;
+      btn.classList.add('opacity-70');
+      errEl.classList.add('hidden');
+      try {
+        await cloud.authMod.signInWithEmailAndPassword(cloud.auth, email, pass);
+        cloud.isAdmin = true;
+        cloud.email = email;
+        document.getElementById('admin-login-pass').value = '';
         closeModal('admin-auth-modal');
         openAdminPanel();
-      } else {
-        document.getElementById('admin-pin-error').classList.remove('hidden');
+      } catch (err) {
+        errEl.textContent = 'Неверный email или пароль.';
+        errEl.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('opacity-70');
       }
     }
 
